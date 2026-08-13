@@ -106,18 +106,20 @@ def trim_white(img: Image.Image, tolerance: int):
 
 
 def analyze_reference(ref_img: Image.Image, tolerance: int):
-    """Extracts margin fractions from the reference: left/right (for width fit)
-    and bottom (the fixed 'floor' distance every output will match)."""
+    """Extracts margin fractions from the reference: left/right/top (used to size
+    the object so it never runs out of "air") and bottom (the fixed 'floor'
+    distance every output will match)."""
     ref_img = ref_img.convert("RGB")
     W, H = ref_img.size
     bbox = get_bbox(ref_img, tolerance)
     if bbox is None:
-        return 0.0, 0.0, 0.0  # margin_left, margin_right, margin_bottom
+        return 0.0, 0.0, 0.0, 0.0  # margin_left, margin_right, margin_top, margin_bottom
     left, top, right, bottom = bbox
     margin_left = left / W
     margin_right = (W - right) / W
+    margin_top = top / H
     margin_bottom = (H - bottom) / H
-    return margin_left, margin_right, margin_bottom
+    return margin_left, margin_right, margin_top, margin_bottom
 
 
 def process_image(
@@ -125,18 +127,22 @@ def process_image(
     tolerance: int,
     margin_left: float,
     margin_right: float,
+    margin_top: float,
     margin_bottom: float,
 ):
     """Trims the white background off the subject and mounts it on a fixed
-    OUTPUT_SIZE x OUTPUT_SIZE canvas: horizontally centered, with its bottom
-    edge placed at the same floor distance as the reference."""
+    OUTPUT_SIZE x OUTPUT_SIZE canvas: horizontally centered, sized so it always
+    keeps at least the reference's top margin of air, with its bottom edge
+    placed at the same floor distance as the reference."""
     img = img.convert("RGB")
     cropped = trim_white(img, tolerance)
     obj_w, obj_h = cropped.size
 
     avail_w = max(OUTPUT_SIZE * (1 - margin_left - margin_right), 1)
     floor_px = int(round(margin_bottom * OUTPUT_SIZE))
-    avail_h = max(OUTPUT_SIZE - floor_px, 1)  # space from canvas top down to the floor line
+    # height budget bounded by BOTH the reference's top margin and its floor distance,
+    # so the subject never touches the top edge even when width isn't the limiting factor
+    avail_h = max(OUTPUT_SIZE * (1 - margin_top - margin_bottom), 1)
 
     scale = min(avail_w / obj_w, avail_h / obj_h)
     new_w = max(1, int(round(obj_w * scale)))
@@ -192,11 +198,12 @@ with col2:
 ref_data = None
 if ref_file:
     ref_img = Image.open(ref_file)
-    ml, mr, mb = analyze_reference(ref_img, tolerance)
-    ref_data = (ml, mr, mb)
+    ml, mr, mt, mb = analyze_reference(ref_img, tolerance)
+    ref_data = (ml, mr, mt, mb)
     st.success(
-        f"Reference margins → left {ml:.1%} · right {mr:.1%} · floor (bottom) {mb:.1%} "
-        f"— every output will share this floor distance and be horizontally centered."
+        f"Reference margins → left {ml:.1%} · right {mr:.1%} · top (min. air) {mt:.1%} · "
+        f"floor (bottom) {mb:.1%} — every output will share this floor distance, keep at "
+        f"least this much air on top, and be horizontally centered."
     )
     st.image(ref_img, caption="Reference image", width=220)
 
@@ -221,7 +228,7 @@ if batch_files:
 # ----------------------------------------------------------------------------
 if ref_data and batch_files:
     if st.button("🚀 Process batch", type="primary"):
-        ml, mr, mb = ref_data
+        ml, mr, mt, mb = ref_data
         icc_bytes = icc_file.read() if icc_file else None
         zip_buffer = io.BytesIO()
         progress = st.progress(0)
@@ -237,7 +244,7 @@ if ref_data and batch_files:
                 status.text(f"Processing: {f.name}")
                 try:
                     img = Image.open(f)
-                    result = process_image(img, tolerance, ml, mr, mb)
+                    result = process_image(img, tolerance, ml, mr, mt, mb)
                     jpeg_bytes = save_to_spec(result, jpg_quality, icc_bytes)
                     zf.writestr(f.name, jpeg_bytes)
 
